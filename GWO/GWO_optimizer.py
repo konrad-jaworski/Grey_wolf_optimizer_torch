@@ -52,18 +52,51 @@ class GWOOptimizer:
         """Clamp positions to stay within bounds."""
         return torch.min(torch.max(positions, self.lowers), self.uppers)
 
+    def _evaluate_population(self):
+        """Safely evaluate all agents, ensuring proper tensor shape."""
+        # Evaluate each agent individually
+        scores = []
+        for agent in self.agents:
+            score = self.objective_function(agent)
+            # Ensure score is a scalar
+            if isinstance(score, torch.Tensor):
+                score = score.item() if score.dim() == 0 else score.squeeze().item()
+            scores.append(score)
+        
+        # Convert to tensor with proper shape
+        return torch.tensor(scores, device=self.device)
+
     def optimize(self):
         """Run the optimization."""
         loss_curve = []
 
         for i in tqdm(range(self.max_iter)):
             # Evaluate all agents
-            Z = torch.tensor([self.objective_function(x) for x in self.agents], device=self.device)
-
+            Z = self._evaluate_population()  # Shape: [population_size]
+            
             # Sort and select alpha, beta, delta
             Z_sorted, idx = torch.sort(Z)
-            self.alpha, self.beta, self.delta = self.agents[idx[0]], self.agents[idx[1]], self.agents[idx[2]]
-            loss_curve.append(Z_sorted[0].item())
+            
+            # Ensure we have at least 3 agents for alpha, beta, delta
+            if self.population_size >= 3:
+                self.alpha = self.agents[idx[0]]
+                self.beta = self.agents[idx[1]] 
+                self.delta = self.agents[idx[2]]
+                self.alpha_score = Z_sorted[0].item()
+                self.beta_score = Z_sorted[1].item()
+                self.delta_score = Z_sorted[2].item()
+            else:
+                # Handle small population sizes
+                self.alpha = self.agents[idx[0]]
+                self.alpha_score = Z_sorted[0].item()
+                if self.population_size >= 2:
+                    self.beta = self.agents[idx[1]]
+                    self.beta_score = Z_sorted[1].item()
+                if self.population_size >= 3:
+                    self.delta = self.agents[idx[2]]
+                    self.delta_score = Z_sorted[2].item()
+            
+            loss_curve.append(self.alpha_score)
 
             a = self.a_range[i]
 
@@ -76,15 +109,23 @@ class GWOOptimizer:
             C2 = 2 * torch.rand_like(self.agents)
             C3 = 2 * torch.rand_like(self.agents)
 
-            # Distances
+            # Distances - handle cases where beta/delta might not exist
             D_alpha = torch.abs(C1 * self.alpha - self.agents)
-            D_beta  = torch.abs(C2 * self.beta  - self.agents)
-            D_delta = torch.abs(C3 * self.delta - self.agents)
+            
+            if self.beta is not None:
+                D_beta = torch.abs(C2 * self.beta - self.agents)
+                X2 = self.beta - A2 * D_beta
+            else:
+                X2 = self.alpha.clone()  # Fall back to alpha
+                
+            if self.delta is not None:
+                D_delta = torch.abs(C3 * self.delta - self.agents)
+                X3 = self.delta - A3 * D_delta
+            else:
+                X3 = self.alpha.clone()  # Fall back to alpha
 
             # Update positions
             X1 = self.alpha - A1 * D_alpha
-            X2 = self.beta  - A2 * D_beta
-            X3 = self.delta - A3 * D_delta
             self.agents = (X1 + X2 + X3) / 3.0
 
             # Clamp to bounds
